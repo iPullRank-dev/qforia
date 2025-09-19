@@ -2,7 +2,6 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
-import re
 
 # App config
 st.set_page_config(page_title="Qforia", layout="wide")
@@ -11,21 +10,61 @@ st.title("🔍 Qforia: Query Fan-Out Simulator for AI Surfaces")
 # Sidebar: API key input and query
 st.sidebar.header("Configuration")
 gemini_key = st.sidebar.text_input("Gemini API Key", type="password")
-user_query = st.sidebar.text_area("Enter your query", "What's the best electric SUV for driving up mt rainier?", height=120)
+
+input_mode = st.sidebar.radio("Input Mode", ["Single query", "Bulk list"])
+if input_mode == "Single query":
+    user_query = st.sidebar.text_area(
+        "Enter your query",
+        "What's the best electric SUV for driving up mt rainier?",
+        height=120
+    )
+else:
+    bulk_text = st.sidebar.text_area(
+        "Paste queries (one per line)",
+        "best electric suv for snow\nsleep training methods for toddlers\nhow to freeze sourdough starter",
+        height=180
+    )
+
 mode = st.sidebar.radio("Search Mode", ["AI Overview (simple)", "AI Mode (complex)"])
 
-# Configure Gemini
+# Configure Gemini (use 2.5 Pro)
 if gemini_key:
     genai.configure(api_key=gemini_key)
-    # Ensure you are using a model that supports longer/complex JSON outputs well.
-    # The user's model "gemini-2.5-flash-preview-05-20" might be a specific version;
-    # if issues arise, consider trying "gemini-1.5-flash-latest" or "gemini-1.5-pro-latest".
-    model = genai.GenerativeModel("gemini-1.5-flash-latest") # Using a common recent flash model
+    # You can change to a pinned version like "gemini-2.5-pro-exp-0827" if desired.
+    model_name = "gemini-2.5-pro"
+    model = genai.GenerativeModel(model_name)
 else:
     st.error("Please enter your Gemini API Key to proceed.")
     st.stop()
 
-# Prompt with detailed Chain-of-Thought logic
+# Allowed routing formats (sent to the model)
+ALLOWED_FORMATS = [
+    "web_article",
+    "faq_page",
+    "how_to_steps",
+    "comparison_table",
+    "buyers_guide",
+    "checklist",
+    "product_spec_sheet",
+    "glossary/definition",
+    "pricing_page",
+    "review_roundup",
+    "tutorial_video/transcript",
+    "podcast_transcript",
+    "code_samples/docs",
+    "api_reference",
+    "calculator/tool",
+    "dataset",
+    "image_gallery",
+    "map/local_pack",
+    "forum/qna",
+    "pdf_whitepaper",
+    "case_study",
+    "press_release",
+    "interactive_widget"
+]
+
+# Prompt builder
 def QUERY_FANOUT_PROMPT(q, mode):
     min_queries_simple = 10
     min_queries_complex = 20
@@ -33,133 +72,172 @@ def QUERY_FANOUT_PROMPT(q, mode):
     if mode == "AI Overview (simple)":
         num_queries_instruction = (
             f"First, analyze the user's query: \"{q}\". Based on its complexity and the '{mode}' mode, "
-            f"**you must decide on an optimal number of queries to generate.** "
-            f"This number must be **at least {min_queries_simple}**. "
-            f"For a straightforward query, generating around {min_queries_simple}-{min_queries_simple + 2} queries might be sufficient. "
-            f"If the query has a few distinct aspects or common follow-up questions, aim for a slightly higher number, perhaps {min_queries_simple + 3}-{min_queries_simple + 5} queries. "
-            f"Provide a brief reasoning for why you chose this specific number of queries. The queries themselves should be tightly scoped and highly relevant."
+            f"you must decide on an optimal number of queries to generate. "
+            f"This number must be at least {min_queries_simple}. "
+            f"For a straightforward query, generate around {min_queries_simple}-{min_queries_simple + 2}. "
+            f"If the query has a few distinct aspects or common follow-ups, aim for {min_queries_simple + 3}-{min_queries_simple + 5}. "
+            f"Provide brief reasoning for why you chose this number."
         )
-    else:  # AI Mode (complex)
+    else:
         num_queries_instruction = (
             f"First, analyze the user's query: \"{q}\". Based on its complexity and the '{mode}' mode, "
-            f"**you must decide on an optimal number of queries to generate.** "
-            f"This number must be **at least {min_queries_complex}**. "
-            f"For multifaceted queries requiring exploration of various angles, sub-topics, comparisons, or deeper implications, "
-            f"you should generate a more comprehensive set, potentially {min_queries_complex + 5}-{min_queries_complex + 10} queries, or even more if the query is exceptionally broad or deep. "
-            f"Provide a brief reasoning for why you chose this specific number of queries. The queries should be diverse and in-depth."
+            f"you must decide on an optimal number of queries to generate. "
+            f"This number must be at least {min_queries_complex}. "
+            f"For multifaceted queries that span comparisons, procedures, specs, or trade-offs, "
+            f"generate {min_queries_complex + 5}-{min_queries_complex + 10} or more. "
+            f"Provide brief reasoning for your number."
         )
 
+    routing_note = (
+        "For EACH expanded query, also identify the most likely CONTENT TYPE / FORMAT the routing system would prefer "
+        "for retrieval and synthesis (e.g., a how-to should route to 'how_to_steps' or a video transcript; comparisons to 'comparison_table' or 'buyers_guide'). "
+        "Choose exactly ONE label from this fixed list:\n"
+        + ", ".join(ALLOWED_FORMATS) +
+        ".\nReturn it in a field named 'routing_format' and give a short 'format_reason' (1 sentence)."
+    )
+
     return (
-        f"You are simulating Google's AI Mode query fan-out process for generative search systems.\n"
+        f"You are simulating Google's AI Mode query fan-out for generative search systems.\n"
         f"The user's original query is: \"{q}\". The selected mode is: \"{mode}\".\n\n"
-        f"**Your first task is to determine the total number of queries to generate and the reasoning for this number, based on the instructions below:**\n"
+        f"Your first task is to determine the total number of queries to generate and the reasoning for this number:\n"
         f"{num_queries_instruction}\n\n"
-        f"**Once you have decided on the number and the reasoning, generate exactly that many unique synthetic queries.**\n"
-        "Each of the following query transformation types MUST be represented at least once in the generated set, if the total number of queries you decide to generate allows for it (e.g., if you generate 12 queries, try to include all 6 types at least once, and then add more of the relevant types):\n"
-        "1. Reformulations\n2. Related Queries\n3. Implicit Queries\n4. Comparative Queries\n5. Entity Expansions\n6. Personalized Queries\n\n"
-        "The 'reasoning' field for each *individual query* should explain why that specific query was generated in relation to the original query, its type, and the overall user intent.\n"
-        "Do NOT include queries dependent on real-time user history or geolocation.\n\n"
-        "Return only a valid JSON object. The JSON object should strictly follow this format:\n"
+        f"Once you have decided on the number and the reasoning, generate exactly that many unique synthetic queries.\n"
+        f"Each of the following transformation types MUST be represented at least once, if the total allows:\n"
+        f"1. Reformulations\n2. Related Queries\n3. Implicit Queries\n4. Comparative Queries\n5. Entity Expansions\n6. Personalized Queries\n\n"
+        f"The 'reasoning' field for each query should explain why that query was generated (tie it to the original query, its type, and user intent). "
+        f"Do NOT include queries dependent on real-time user history or geolocation.\n\n"
+        f"{routing_note}\n\n"
+        f"Return only a valid JSON object in this exact schema:\n"
         "{\n"
         "  \"generation_details\": {\n"
-        "    \"target_query_count\": 12, // This is an EXAMPLE number; you will DETERMINE the actual number based on your analysis.\n"
-        "    \"reasoning_for_count\": \"The user query was moderately complex, so I chose to generate slightly more than the minimum for a simple overview to cover key aspects like X, Y, and Z.\" // This is an EXAMPLE reasoning; provide your own.\n"
+        "    \"target_query_count\": 12,\n"
+        "    \"reasoning_for_count\": \"...\"\n"
         "  },\n"
         "  \"expanded_queries\": [\n"
-        "    // Array of query objects. The length of this array MUST match your 'target_query_count'.\n"
         "    {\n"
-        "      \"query\": \"Example query 1...\",\n"
-        "      \"type\": \"reformulation\",\n"
-        "      \"user_intent\": \"Example intent...\",\n"
-        "      \"reasoning\": \"Example reasoning for this specific query...\"\n"
-        "    },\n"
-        "    // ... more query objects ...\n"
+        "      \"query\": \"...\",\n"
+        "      \"type\": \"reformulation | related | implicit | comparative | entity_expansion | personalized\",\n"
+        "      \"user_intent\": \"...\",\n"
+        "      \"reasoning\": \"...\",\n"
+        "      \"routing_format\": \"one_of_allowed_labels\",\n"
+        "      \"format_reason\": \"one sentence why this format is best\"\n"
+        "    }\n"
         "  ]\n"
         "}"
     )
 
-# Fan-out generation function
+# Single fan-out
 def generate_fanout(query, mode):
     prompt = QUERY_FANOUT_PROMPT(query, mode)
-    try:
-        response = model.generate_content(prompt)
-        json_text = response.text.strip()
-        
-        # Clean potential markdown code block fences
-        if json_text.startswith("```json"):
-            json_text = json_text[7:]
-        if json_text.endswith("```"):
-            json_text = json_text[:-3]
-        json_text = json_text.strip()
+    response = model.generate_content(prompt)
+    json_text = response.text.strip()
 
-        data = json.loads(json_text)
-        generation_details = data.get("generation_details", {})
-        expanded_queries = data.get("expanded_queries", [])
+    # Clean code fences if present
+    if json_text.startswith("```json"):
+        json_text = json_text[7:]
+    if json_text.endswith("```"):
+        json_text = json_text[:-3]
+    json_text = json_text.strip()
 
-        # Store details for display
-        st.session_state.generation_details = generation_details
+    data = json.loads(json_text)
+    generation_details = data.get("generation_details", {})
+    expanded_queries = data.get("expanded_queries", [])
 
-        return expanded_queries
-    except json.JSONDecodeError as e:
-        st.error(f"🔴 Failed to parse Gemini response as JSON: {e}")
-        st.text("Raw response that caused error:")
-        st.text(json_text if 'json_text' in locals() else "N/A (error before json_text assignment)")
-        st.session_state.generation_details = None
-        return None
-    except Exception as e:
-        st.error(f"🔴 An unexpected error occurred during generation: {e}")
-        if hasattr(response, 'text'):
-             st.text("Raw response content (if available):")
-             st.text(response.text)
-        st.session_state.generation_details = None
-        return None
+    return generation_details, expanded_queries, json_text
 
-# Initialize session state for generation_details if not present
-if 'generation_details' not in st.session_state:
-    st.session_state.generation_details = None
+# Initialize session state
+if 'last_runs' not in st.session_state:
+    st.session_state.last_runs = []
 
-# Generate and display results
+# Run button
 if st.sidebar.button("Run Fan-Out 🚀"):
-    # Clear previous details
-    st.session_state.generation_details = None
-    
-    if not user_query.strip():
-        st.warning("⚠️ Please enter a query.")
+    # Build list of lookup queries
+    if input_mode == "Single query":
+        lookups = [user_query.strip()] if user_query.strip() else []
     else:
-        with st.spinner("🤖 Generating query fan-out using Gemini... This may take a moment..."):
-            results = generate_fanout(user_query, mode)
+        lookups = [q.strip() for q in bulk_text.splitlines() if q.strip()]
 
-        if results: # Check if results is not None and not empty
-            st.success("✅ Query fan-out complete!")
+    if not lookups:
+        st.warning("⚠️ Please provide at least one query.")
+        st.stop()
 
-            # Display the reasoning for the count if available
-            if st.session_state.generation_details:
-                details = st.session_state.generation_details
-                generated_count = len(results)
-                target_count_model = details.get('target_query_count', 'N/A')
-                reasoning_model = details.get('reasoning_for_count', 'Not provided by model.')
+    all_rows = []
+    run_summaries = []
+    errors = []
 
-                st.markdown("---")
-                st.subheader("🧠 Model's Query Generation Plan")
-                st.markdown(f"🔹 **Target Number of Queries Decided by Model:** `{target_count_model}`")
-                st.markdown(f"🔹 **Model's Reasoning for This Number:** _{reasoning_model}_")
-                st.markdown(f"🔹 **Actual Number of Queries Generated:** `{generated_count}`")
-                st.markdown("---")
-                
-                if isinstance(target_count_model, int) and target_count_model != generated_count:
-                    st.warning(f"⚠️ Note: Model aimed to generate {target_count_model} queries but actually produced {generated_count}.")
-            else:
-                 st.info("ℹ️ Generation details (target count, reasoning) were not available from the model's response.")
+    status = st.status("Processing queries…", expanded=True)
+    progress = st.progress(0)
+    total = len(lookups)
 
+    for i, q in enumerate(lookups, start=1):
+        try:
+            details, expanded, raw = generate_fanout(q, mode)
+            run_summaries.append({
+                "lookup_query": q,
+                "target_query_count": details.get("target_query_count"),
+                "reasoning_for_count": details.get("reasoning_for_count", "")
+            })
+            # Flatten rows, prefix with lookup query
+            for obj in expanded:
+                all_rows.append({
+                    "lookup_query": q,
+                    "query": obj.get("query", ""),
+                    "type": obj.get("type", ""),
+                    "user_intent": obj.get("user_intent", ""),
+                    "reasoning": obj.get("reasoning", ""),
+                    "routing_format": obj.get("routing_format", ""),
+                    "format_reason": obj.get("format_reason", "")
+                })
+            status.write(f"✅ Processed: **{q}** — generated {len(expanded)} queries.")
+        except json.JSONDecodeError as e:
+            msg = f"❌ JSON parse failed for '{q}': {e}"
+            status.write(msg)
+            errors.append({"lookup_query": q, "error": str(e)})
+        except Exception as e:
+            msg = f"❌ Error for '{q}': {e}"
+            status.write(msg)
+            errors.append({"lookup_query": q, "error": str(e)})
 
-            df = pd.DataFrame(results)
-            st.dataframe(df, use_container_width=True, height=(min(len(df), 20) + 1) * 35 + 3) # Dynamic height
+        progress.progress(i / total)
 
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download CSV", data=csv, file_name="qforia_output.csv", mime="text/csv")
-        
-        elif results is None: # Error occurred in generate_fanout
-            # Error message is already displayed by generate_fanout
-            pass
-        else: # Handle empty results list (empty list, not None)
-            st.warning("⚠️ No queries were generated. The model returned an empty list, or there was an issue.")
+    status.update(label="Complete.", state="complete")
+
+    # Build output DataFrame (lookup_query first)
+    if all_rows:
+        df = pd.DataFrame(all_rows)
+
+        # Ensure column order (lookup_query first)
+        preferred_cols = [
+            "lookup_query",
+            "query",
+            "type",
+            "user_intent",
+            "reasoning",
+            "routing_format",
+            "format_reason"
+        ]
+        existing = [c for c in preferred_cols if c in df.columns]
+        others = [c for c in df.columns if c not in existing]
+        df = df[existing + others]
+
+        st.subheader("📊 Synthetic Queries (with routing format)")
+        st.dataframe(df, use_container_width=True, height=(min(len(df), 20) + 1) * 35 + 3)
+
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download CSV", data=csv, file_name="qforia_output_bulk_with_routing.csv", mime="text/csv")
+    else:
+        st.warning("No synthetic queries were generated.")
+
+    # Summaries per lookup (optional)
+    if run_summaries:
+        st.markdown("---")
+        st.subheader("🧠 Generation Plans (per lookup)")
+        sum_df = pd.DataFrame(run_summaries)
+        st.dataframe(sum_df, use_container_width=True)
+
+    # Error table if any
+    if errors:
+        st.markdown("---")
+        st.subheader("⚠️ Errors")
+        err_df = pd.DataFrame(errors)
+        st.dataframe(err_df, use_container_width=True)
