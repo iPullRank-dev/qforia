@@ -1844,11 +1844,17 @@ with tab_results:
                 "clusters": r["cluster_count"],
                 "passes ok": sum(1 for p in r["passes"] if not p["error"]),
                 "requests": r["engine_requests"], "status": r["status"], "run id": r.get("run_id"),
+                "error": next((p["error"] for p in r["passes"] if p["error"]), "") if r["queries_df"].empty else "",
             } for r in results])
             st.dataframe(summary, hide_index=True)
-            all_csv = pd.concat([export_frame(r) for r in results if not r["queries_df"].empty], ignore_index=True)
-            st.download_button("Download all seeds (CSV)", all_csv.to_csv(index=False).encode("utf-8"),
-                               file_name="qforia_bulk.csv", mime="text/csv")
+            frames = [export_frame(r) for r in results if not r["queries_df"].empty]
+            if frames:
+                all_csv = pd.concat(frames, ignore_index=True)
+                st.download_button("Download all seeds (CSV)", all_csv.to_csv(index=False).encode("utf-8"),
+                                   file_name="qforia_bulk.csv", mime="text/csv")
+            else:
+                st.error("None of the seed queries returned fan-out queries. "
+                         "Check the error column above (usually the API key, billing, or rate limits).")
             idx = st.selectbox("Seed query", range(len(results)), format_func=lambda i: results[i]["seed"])
             st.markdown("---")
         else:
