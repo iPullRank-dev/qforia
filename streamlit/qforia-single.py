@@ -86,7 +86,7 @@ def generate_fanout(query, mode):
         json_text = response.text.strip()
         
         # Clean potential markdown code block fences
-        if json_text.startswith("```json"):
+        if json_text.startswith("```json"): 
             json_text = json_text[7:]
         if json_text.endswith("```"):
             json_text = json_text[:-3]
