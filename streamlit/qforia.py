@@ -31,7 +31,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 import numpy as np
 import pandas as pd
@@ -1506,11 +1506,16 @@ def saturation_figure(sat: pd.DataFrame, theme: str) -> go.Figure:
     return fig
 
 
+def google_search_url(query: str) -> str:
+    return "https://www.google.com/search?q=" + quote_plus(str(query))
+
+
 def results_table(res: dict) -> pd.DataFrame:
     df = res["queries_df"].copy()
+    df["google"] = df["query"].map(google_search_url)
     df["weight_pct"] = (df["weight"] * 100).round(0)
     df["type_display"] = df["type"].map(lambda t: TYPE_DISPLAY.get(t, str(t).upper()))
-    cols = ["query", "type_display", "user_intent", "routing_format", "cluster_label",
+    cols = ["query", "google", "type_display", "user_intent", "routing_format", "cluster_label",
             "frequency", "weight_pct", "passes_seen", "avg_rank"]
     if not (df["cluster_id"] >= 0).any():
         cols.remove("cluster_label")
@@ -1522,6 +1527,7 @@ def results_table(res: dict) -> pd.DataFrame:
 def export_frame(res: dict) -> pd.DataFrame:
     df = res["queries_df"].drop(columns=["_emb"], errors="ignore").copy()
     df.insert(0, "lookup_query", res["seed"])
+    df.insert(2, "google_search_url", df["query"].map(google_search_url))
     df["passes_seen"] = df["passes_seen"].apply(lambda v: ";".join(str(i) for i in v))
     df["type_votes"] = df["type_votes"].apply(json.dumps)
     df["format_votes"] = df["format_votes"].apply(json.dumps)
@@ -1598,6 +1604,8 @@ def render_result(res: dict, key: str) -> None:
     tdf = results_table(res)
     colcfg = {
         "query": st.column_config.TextColumn("Query", width="large"),
+        "google": st.column_config.LinkColumn("Google", display_text="Search ↗",
+                                              help="Open this query in Google Search (new tab)"),
         "type_display": st.column_config.TextColumn("Type"),
         "user_intent": st.column_config.TextColumn("Intent", width="large"),
         "routing_format": st.column_config.TextColumn("Routing format"),
